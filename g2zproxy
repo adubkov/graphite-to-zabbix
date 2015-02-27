@@ -1,0 +1,238 @@
+#!/usr/bin/env python
+
+import logging
+import sys
+import time
+import urllib2
+import yaml
+
+from multiprocessing.pool import ThreadPool as Pool
+
+try:
+    import argparse
+except:
+    print("You need python 2.7+ or installed argparse module.\n\tpip install argparse")
+    exit()
+
+try:
+    from zabbix.api import ZabbixAPI
+    from zabbix.sender import ZabbixSender, ZabbixMetric
+except:
+    print("Zabbix module is require.")
+    exit()
+
+logging.basicConfig(level = logging.DEBUG, format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
+logger = logging.getLogger(__name__)
+
+class G2ZProxyException(Exception):
+    pass
+
+class G2ZProxy(object):
+    """
+    Proxy between Graphite and Zabbix servers.
+
+    Attributes:
+        pattern (str)   Pattern for graphites key in zabbix.
+                        Default: graphite*
+    """
+
+    def __init__(self, pattern='graphite*',
+                zabbix_url='http://localhost',
+                zabbix_user='admin',
+                zabbix_pass='zabbix',
+                graphite_url='http://localhost',
+                threads='1'):
+
+        self.cn = self.__class__.__name__
+
+        # Takes needed metric from zabbix
+        self.pattern = pattern
+        self.zabbix_url = zabbix_url
+        self.graphite_url = graphite_url + '/render?from=-5minutes&rawData=true&target={req}&format=json'
+        self.zapi = ZabbixAPI(self.zabbix_url, user=zabbix_user, password=zabbix_pass)
+        self.threads = threads
+        self._main()
+
+    def _getHostsFromMetrics(self, metrics):
+        """
+        Get list of unique hosts from metric list.
+
+        Attributes:
+          metrics (list)    List of metrics from zabbix
+        """
+
+        # Get list of uniq hostid
+        hostids = list(set(map(lambda x: int(x['hostid']), metrics)))
+
+        # Get host names by id
+        hostids = self.zapi.host.get(hostids = hostids, output = ['name'])
+
+        hosts = {}
+        for m in hostids:
+            hosts.update({ int(m['hostid']): m['name'] })
+
+        logger.debug("{0}:_getHostsFromMetrics(metrics):{1}".format(self.__class__.__name__, hosts))
+
+        return hosts
+
+    def _getMonitoredMetrics(self):
+        """
+        Return monitored metrics from zabbix
+        """
+
+        result = None
+        if self.zapi:
+            metrics = self.zapi.item.get(
+                search = { 'key_': self.pattern },
+                searchWildcardsEnabled = True,
+                monitored = True,
+                output = ['key_', 'hostid'])
+            result = metrics
+
+        logger.debug("{0}:_getMonitoredMetrics(metrics):{1}".format(self.__class__.__name__, result))
+        return result
+
+
+    def _getMetrics(self):
+        """
+        Get metrics from zabbix transform it to list of key, value pairs.
+        """
+
+        result = None
+        metrics = self._getMonitoredMetrics()
+        hosts = self._getHostsFromMetrics(metrics)
+
+        # Get key name eg 'graphite' from 'graphite[....]'
+        self.key = metrics[0]['key_'][0:metrics[0]['key_'].find('[')]
+        key_len = len(self.key)
+
+        def metrics_filter(m):
+            return {
+                'host': hosts[int(m['hostid'])],
+                'metric': m['key_'][key_len + 1:-1],
+            }
+
+        # Input:    [ {'key_':'graphite[value]', 'hostid': '1', 'other': ... }, ... ]
+        # Output:   [ {'host': 'localhost', 'metric':'value'}, ... ]
+        result = map(metrics_filter, metrics)
+
+        logger.debug("{0}:_getMonitored():{1}".format(self.__class__.__name__, result))
+        return result
+
+    def _createGraphiteRequest(self, metric):
+        """
+        Create http request string to Graphite server.
+
+        We can use function in request:
+            graphite[metric_name, graphite_func({metric})] will be translate to:
+            target=graphite_func(metric_name)
+        """
+
+        result = None
+
+        params = map(lambda x: x.strip(), metric['metric'].split(';'))
+
+        if len(params) > 1:
+            req_metric = '{0}.{1}'.format(metric['host'], params[0])
+            req = params[1].format(metric=req_metric)
+        else:
+            req = '{host}.{metric}'
+
+        req = req.format(host = metric['host'], metric = metric['metric'])
+
+        result = self.graphite_url.format(req = req)
+        logger.debug("{0}:_getGraphiteData(): url:{1}".format(self.__class__.__name__, result))
+
+        return result
+
+    def _getGraphiteData(self):
+        """
+        Fill self.metrics with data from Graphite
+        """
+
+        def getData(metric):
+            # Create a request to graphite server for specifiec metric
+            url = self._createGraphiteRequest(metric)
+
+            s_time = time.time()
+            try:
+                # Get data from graphite API
+                res = urllib2.urlopen(url)
+                data = yaml.load(res)
+            except:
+                # if error, process next metric
+                pass #continue
+            finally:
+                e_time = time.time() - s_time
+                # Convert to milliseconds
+                e_time = int(e_time * 1000)
+                print "{time}ms/t{url}".format(time = e_time, url = url)
+
+            logger.debug("{0}:_getGraphiteData(): data:{1}\n".format(self.__class__.__name__, data))
+            # Process data if it not empty
+            if len(data) and 'datapoints' in data[0]:
+                data = filter(lambda d: d[0] != None, data[0]['datapoints'])
+                logger.debug("{0}:_getGraphiteData(): filter(data):{1}".format(self.__class__.__name__, data))
+
+                if data:
+                    len_data = len(data)
+                    # Get avarage value and time
+                    data = [ v / len_data for v in reduce(lambda x, y: [ x[0] + y[0], x[1] + y[1] ], data) ]
+                    # Update metric record
+                    metric.update({ 'value': data[0], 'time': data[1] })
+
+        pool = Pool(processes=50)
+        pool.map(getData, self.metrics)
+        pool.close()
+        pool.join()
+
+    def _main(self):
+        """
+        Main function of the class.
+        """
+
+        # Get zabbix metrics and host
+        self.metrics = self._getMetrics()
+
+        # Get graphite data
+        self._getGraphiteData()
+
+        # Create zabbix message packet
+        msg = []
+        for m in self.metrics:
+            if 'value' in m:
+                metric = '{0}[{1}]'.format(self.key, m['metric'])
+                msg.append(ZabbixMetric(m['host'], metric, m['value'], m['time']))
+
+        ZabbixSender(use_config=True).send(msg)
+        print(len(self.metrics))
+
+if __name__ == '__main__':
+
+    argparser = argparse.ArgumentParser(description="Graphite to Zabbix proxy",
+            prog="g2zproxy")
+
+    argparser.add_argument('-v', '--version', action='version', version='%(prog)s 0.1')
+    argparser.add_argument('-z', '--zabbix-url', default='http://localhost',
+            help='Specify URL to Zabbix.')
+    argparser.add_argument('-zu', '--zabbix-user', default='admin',
+            help='Specify zabbix user.')
+    argparser.add_argument('-zp', '--zabbix-pass', default='zabbix',
+            help='Specify zabbix password.')
+    argparser.add_argument('-g', '--graphite-url', default='http://localhost',
+            help='Specify URL to Graphite.')
+    argparser.add_argument('-t', '--threads', default='50',
+            help='Number threads to get simultaneously requests to Graphite')
+
+    args = argparser.parse_args()
+
+    # if no arguments - show help
+    if len(sys.argv) <= 1:
+        argparser.print_help()
+        exit()
+
+    G2ZProxy(zabbix_url = args.zabbix_url,
+            zabbix_user = args.zabbix_user,
+            zabbix_pass = args.zabbix_pass,
+            graphite_url = args.graphite_url,
+            threads = args.threads)
