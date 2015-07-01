@@ -159,14 +159,15 @@ class G2ZProxy(object):
                 # Get data from graphite API
                 res = urllib2.urlopen(url)
                 data = yaml.load(res)
-            except:
-                # if error, process next metric
+            except Exception as e:
+                # if error, process next metric and print exception
+		logger.error('%s', e)
                 pass #continue
             finally:
                 e_time = time.time() - s_time
                 # Convert to milliseconds
                 e_time = int(e_time * 1000)
-                print "{time}ms/t{url}".format(time = e_time, url = url)
+                print "{time}ms/t {url}".format(time = e_time, url = url)
 
             logger.debug("{0}:_getGraphiteData(): data:{1}\n".format(self.__class__.__name__, data))
             # Process data if it not empty
@@ -179,12 +180,18 @@ class G2ZProxy(object):
                     # Get avarage value and time
                     data = [ v / len_data for v in reduce(lambda x, y: [ x[0] + y[0], x[1] + y[1] ], data) ]
                     # Update metric record
+		    logger.debug({'value': data[0], 'time': data[1] })
                     metric.update({ 'value': data[0], 'time': data[1] })
 
-        pool = Pool(processes=50)
-        pool.map(getData, self.metrics)
-        pool.close()
-        pool.join()
+	    pool = Pool(processes=50)
+	    try:
+		pool.map(getData, self.metrics)
+	    except Exception as e:
+		logger.error('%s', e)
+		pass
+	    finally:
+	        pool.close()
+        	pool.join()
 
     def _main(self):
         """
