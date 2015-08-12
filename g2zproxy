@@ -41,7 +41,7 @@ class G2ZProxy(object):
                 zabbix_user='admin',
                 zabbix_pass='zabbix',
                 graphite_url='http://localhost',
-                threads='1'):
+                threads=1):
 
         self.cn = self.__class__.__name__
 
@@ -65,7 +65,7 @@ class G2ZProxy(object):
         hostids = list(set(map(lambda x: int(x['hostid']), metrics)))
 
         # Get host names by id
-        hostids = self.zapi.host.get(hostids = hostids, output = ['name'])
+        hostids = self.zapi.host.get(hostids=hostids, output=['name'])
 
         hosts = {}
         for m in hostids:
@@ -138,9 +138,9 @@ class G2ZProxy(object):
         else:
             req = '{host}.{metric}'
 
-        req = req.format(host = metric['host'], metric = metric['metric'])
+        req = req.format(host=metric['host'], metric=metric['metric'])
 
-        result = self.graphite_url.format(req = req)
+        result = self.graphite_url.format(req=req)
         logger.debug("{0}:_getGraphiteData(): url:{1}".format(self.__class__.__name__, result))
 
         return result
@@ -162,12 +162,12 @@ class G2ZProxy(object):
             except Exception as e:
                 # if error, process next metric and print exception
 		logger.error('%s', e)
-                pass #continue
+                return #continue
             finally:
                 e_time = time.time() - s_time
                 # Convert to milliseconds
                 e_time = int(e_time * 1000)
-                print "{time}ms/t {url}".format(time = e_time, url = url)
+                print "{url} {time}ms".format(time=e_time, url=url)
 
             logger.debug("{0}:_getGraphiteData(): data:{1}\n".format(self.__class__.__name__, data))
             # Process data if it not empty
@@ -183,15 +183,15 @@ class G2ZProxy(object):
 		    logger.debug({'value': data[0], 'time': data[1] })
                     metric.update({ 'value': data[0], 'time': data[1] })
 
-	    pool = Pool(processes=50)
-	    try:
-		pool.map(getData, self.metrics)
-	    except Exception as e:
-		logger.error('%s', e)
-		pass
-	    finally:
-	        pool.close()
-        	pool.join()
+        pool = Pool(processes=self.threads)
+        try:
+            pool.map(getData, self.metrics)
+        except Exception as e:
+            logger.error('%s', e)
+            pass
+        finally:
+            pool.close()
+            pool.join()
 
     def _main(self):
         """
@@ -228,7 +228,7 @@ if __name__ == '__main__':
             help='Specify zabbix password.')
     argparser.add_argument('-g', '--graphite-url', default='http://localhost',
             help='Specify URL to Graphite.')
-    argparser.add_argument('-t', '--threads', default='50',
+    argparser.add_argument('-t', '--threads', default=50, type=int,
             help='Number threads to get simultaneously requests to Graphite')
 
     args = argparser.parse_args()
