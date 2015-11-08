@@ -41,7 +41,8 @@ class G2ZProxy(object):
                 zabbix_user='admin',
                 zabbix_pass='zabbix',
                 graphite_url='http://localhost',
-                threads=1):
+                threads=1,
+                aggregation_function='{metric}'):
 
         self.cn = self.__class__.__name__
 
@@ -49,6 +50,7 @@ class G2ZProxy(object):
         self.pattern = pattern
         self.zabbix_url = zabbix_url
         self.graphite_url = graphite_url + '/render?from=-5minutes&rawData=true&target={req}&format=json'
+        self.aggregation_function = aggregation_function
         self.zapi = ZabbixAPI(self.zabbix_url, user=zabbix_user, password=zabbix_pass)
         self.threads = threads
         self._main()
@@ -139,6 +141,8 @@ class G2ZProxy(object):
             req = '{host}.{metric}'
 
         req = req.format(host=metric['host'], metric=metric['metric'])
+        req = self.aggregation_function.format(metric=req)
+        req = urllib2.quote(req)
 
         result = self.graphite_url.format(req=req)
         logger.debug("{0}:_getGraphiteData(): url:{1}".format(self.__class__.__name__, result))
@@ -172,13 +176,12 @@ class G2ZProxy(object):
             logger.debug("{0}:_getGraphiteData(): data:{1}\n".format(self.__class__.__name__, data))
             # Process data if it not empty
             if len(data) and 'datapoints' in data[0]:
-                data = filter(lambda d: d[0] != None, data[0]['datapoints'])
-                logger.debug("{0}:_getGraphiteData(): filter(data):{1}".format(self.__class__.__name__, data))
+                datapoints = filter(lambda d: d[0] != None, data[0]['datapoints'])
+                logger.debug("{0}:_getGraphiteData(): filter(datapoints):{1}".format(self.__class__.__name__, datapoints))
 
-                if data:
-                    len_data = len(data)
-                    # Get avarage value and time
-                    data = [ v / len_data for v in reduce(lambda x, y: [ x[0] + y[0], x[1] + y[1] ], data) ]
+                if datapoints:
+                    # We are only interested in latest datapoint
+                    data = datapoints[-1]
                     # Update metric record
 		    logger.debug({'value': data[0], 'time': data[1] })
                     metric.update({ 'value': data[0], 'time': data[1] })
@@ -219,7 +222,7 @@ if __name__ == '__main__':
     argparser = argparse.ArgumentParser(description="Graphite to Zabbix proxy",
             prog="g2zproxy")
 
-    argparser.add_argument('-v', '--version', action='version', version='%(prog)s 0.1')
+    argparser.add_argument('-v', '--version', action='version', version='%(prog)s 0.2')
     argparser.add_argument('-z', '--zabbix-url', default='http://localhost',
             help='Specify URL to Zabbix.')
     argparser.add_argument('-zu', '--zabbix-user', default='admin',
@@ -230,6 +233,8 @@ if __name__ == '__main__':
             help='Specify URL to Graphite.')
     argparser.add_argument('-t', '--threads', default=50, type=int,
             help='Number threads to get simultaneously requests to Graphite')
+    argparser.add_argument('-a', '--aggregation-function', default='timeShift(movingAverage({metric}, "5min"), "+150sec")',
+            help='Aggregation function')
 
     args = argparser.parse_args()
 
@@ -242,4 +247,5 @@ if __name__ == '__main__':
             zabbix_user = args.zabbix_user,
             zabbix_pass = args.zabbix_pass,
             graphite_url = args.graphite_url,
-            threads = args.threads)
+            threads = args.threads,
+            aggregation_function = args.aggregation_function)
