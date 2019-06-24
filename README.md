@@ -27,7 +27,7 @@ host: p-mem001
 key: graphite[memcached.memcached_items-current.value]
 ```
 
-#### Graphite requst with functions can be written in that manner.
+#### Graphite request with functions can be written in that manner.
 Graphite request:
 ```
 summarize(sum(statsd.drive_*error*),"5min","avg",true)
